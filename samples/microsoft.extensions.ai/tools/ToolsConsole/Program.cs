@@ -2,6 +2,7 @@
 using McpDotNet.Configuration;
 using McpDotNet.Protocol.Transport;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using OpenAI;
 using SimpleToolsConsole;
@@ -20,12 +21,8 @@ internal class Program
         {
             Id = "everything",
             Name = "Everything",
-            TransportType = TransportTypes.StdIo,
-            TransportOptions = new Dictionary<string, string>
-            {
-                ["command"] = "npx",
-                ["arguments"] = "-y @modelcontextprotocol/server-everything",
-            }
+            TransportType = TransportTypes.Sse,
+            Location = "http://localhost:8080/sse"
         };
 
         var factory = new McpClientFactory(
@@ -53,6 +50,18 @@ internal class Program
                 Console.WriteLine("  " + tool);
             }
 
+            var prompts = await client.ListPromptsAsync();
+            string systemPrompt = string.Empty;
+
+
+            foreach (var prompt in prompts.Prompts)
+            {
+                var promptResult = await client.GetPromptAsync(prompt.Name);
+                string promptStr = promptResult.Messages.FirstOrDefault()?.Content.Text ?? string.Empty;
+                systemPrompt = $"{systemPrompt}\n{promptStr}";
+            }
+
+
             Console.WriteLine("Starting chat with GPT-4o-mini...");
 
             // Note: We use then Microsoft.Extensions.AI.OpenAI client here, but it could be any other MEAI client.
@@ -69,33 +78,50 @@ internal class Program
             IList<Microsoft.Extensions.AI.ChatMessage> messages =
             [
                 // Add a system message
-                new(ChatRole.System, "You are a helpful assistant, helping us test MCP server functionality."),
+                new(ChatRole.System, systemPrompt),
             ];
             // If MCP server provides instructions, add them as an additional system message (you could also add it as a content part)
             if (!string.IsNullOrEmpty(client.ServerInstructions))
             {
                 messages.Add(new(ChatRole.System, client.ServerInstructions));
             }
-            // Add a user message
-            messages.Add(new(ChatRole.User, "Please call the echo tool with the string 'Hello MCP!' and give me the response as-is."));
+            string? userInput;
 
-            // Call the chat client
-            Console.WriteLine("Asking GPT-4o-mini to call the Echo Tool...");
-            var response = chatClient.CompleteStreamingAsync(
+            do
+            {
+                userInput = ReadUserInput();
+                messages.Add(new(ChatRole.User, userInput));
+
+                var response = chatClient.CompleteStreamingAsync(
                     messages,
                     new() { Tools = mappedTools });
 
-            await foreach (var update in response)
-            {
-                Console.Write(update);
-            }
-            Console.WriteLine();
+                string assistantOutput = string.Empty;
+                Console.Write("Assistant >>");
+                await foreach (var update in response)
+                {
+                    assistantOutput = $"{assistantOutput}{update}";
+                    Console.Write(update);
+                }
 
-            Console.WriteLine("Chat with GPT-4o-mini complete");
+                messages.Add(new(ChatRole.Assistant, assistantOutput));
+                Console.WriteLine();
+
+            } while (userInput is not null);
         }
         catch (Exception ex)
         {
             Console.WriteLine("Error occurred: " + ex.Message);
         }
+    }
+
+    private static string ReadUserInput()
+    {
+        Console.ForegroundColor = ConsoleColor.White;
+        Console.Write("\nUser >> ");
+        string userInput = Console.ReadLine();
+        Console.ResetColor();
+
+        return userInput;
     }
 }
